@@ -231,7 +231,7 @@ const CONSOLE_SCRIPT = `(async function() {
     }).filter(Boolean);
     all.push({
       id: t.rest_id, author: usr.name ?? 'Unknown', handle: '@' + (usr.screen_name ?? 'unknown'),
-      timestamp: leg.created_at ?? '', text: leg.full_text ?? leg.text ?? '', media,
+      timestamp: leg.created_at ?? '', text: t.note_tweet?.note_tweet_results?.result?.text ?? leg.full_text ?? leg.text ?? '', media,
       hashtags: (leg.entities?.hashtags ?? []).map(h => h.text),
       urls: (leg.entities?.urls ?? []).map(u => u.expanded_url).filter(Boolean)
     });
