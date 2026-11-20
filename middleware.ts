@@ -9,16 +9,36 @@ import { NextRequest, NextResponse } from 'next/server'
  * The bookmarklet endpoint is excluded so cross-origin imports from x.com
  * continue to work regardless of auth configuration.
  */
+/** tex: constant-time string compare (no early exit on the first differing character) */
+function safeEqual(a: string, b: string): boolean {
+  let diff = a.length ^ b.length
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0)
+  }
+  return diff === 0
+}
+
 export function middleware(request: NextRequest): NextResponse {
   const username = process.env.SIFTLY_USERNAME?.trim()
   const password = process.env.SIFTLY_PASSWORD?.trim()
+
+  const path = request.nextUrl.pathname
+
+  // tex: the bookmarklet endpoint is unauthenticated by design — disabled unless opted in.
+  if (path === '/api/import/bookmarklet' && process.env.SIFTLY_ENABLE_BOOKMARKLET !== '1') {
+    return new NextResponse('Bookmarklet import is disabled (SIFTLY_ENABLE_BOOKMARKLET=1 to enable)', { status: 404 })
+  }
+  // tex: cookie-based X sync (auth_token/ct0, internal GraphQL) stays off unless opted in.
+  if ((path === '/api/import/twitter' || path.startsWith('/api/import/live')) && process.env.SIFTLY_ENABLE_COOKIE_SYNC !== '1') {
+    return new NextResponse('Cookie-based X sync is disabled (SIFTLY_ENABLE_COOKIE_SYNC=1 to enable)', { status: 404 })
+  }
 
   // No credentials configured → pass through (default local behaviour)
   if (!username || !password) return NextResponse.next()
 
   // Let the bookmarklet endpoint through — it's called cross-origin from x.com
   // and can't include Basic Auth credentials.
-  if (request.nextUrl.pathname === '/api/import/bookmarklet') {
+  if (path === '/api/import/bookmarklet') {
     return NextResponse.next()
   }
 
@@ -31,7 +51,7 @@ export function middleware(request: NextRequest): NextResponse {
       if (colonIdx !== -1) {
         const user = decoded.slice(0, colonIdx)
         const pass = decoded.slice(colonIdx + 1)
-        if (user === username && pass === password) {
+        if (safeEqual(user, username) && safeEqual(pass, password)) {
           return NextResponse.next()
         }
       }
