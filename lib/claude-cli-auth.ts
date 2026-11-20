@@ -1,5 +1,6 @@
 import { execSync, spawnSync } from 'child_process'
 import { readFileSync } from 'fs'
+import { cliDisabled } from './tex-config'
 import { join } from 'path'
 import { homedir } from 'os'
 import Anthropic from '@anthropic-ai/sdk'
@@ -79,6 +80,8 @@ function readCliCredentials(): ClaudeOAuthCredentials | null {
       return cachedCredentials
     }
   }
+
+  if (cliDisabled()) return null
 
   // Read fresh credentials
   const creds = process.platform === 'darwin'

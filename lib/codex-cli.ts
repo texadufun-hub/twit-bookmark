@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import { readFileSync, unlinkSync } from 'fs'
+import { cliDisabled } from './tex-config'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
@@ -34,6 +35,7 @@ export async function codexPrompt(
   prompt: string,
   options: CodexCliOptions = {}
 ): Promise<CodexCliResult<string>> {
+  if (cliDisabled()) return { success: false, error: 'CLI disabled (SIFTLY_DISABLE_CLI=1)' }
   const { model, timeoutMs = 120_000 } = options
 
   // Write output to a temp file so we can capture the model's final message cleanly
@@ -81,6 +83,7 @@ let _cliCheckPromise: Promise<boolean> | null = null
 const CLI_CHECK_TTL_MS = 60_000
 
 export async function getCodexCliAvailability(): Promise<boolean> {
+  if (cliDisabled()) return false
   const now = Date.now()
   if (_cliAvailable !== null && now - _cliCheckTime < CLI_CHECK_TTL_MS) return _cliAvailable
   if (_cliCheckPromise) return _cliCheckPromise

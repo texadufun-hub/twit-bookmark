@@ -1,4 +1,5 @@
 import prisma from '@/lib/db'
+import { providerOverride } from '@/lib/tex-config'
 
 // Module-level caches — avoids hundreds of DB roundtrips per pipeline run
 let _cachedModel: string | null = null
@@ -30,6 +31,8 @@ export async function getAnthropicModel(): Promise<string> {
  * Get the active AI provider (cached for 5 minutes).
  */
 export async function getProvider(): Promise<'anthropic' | 'openai' | 'minimax'> {
+  const forced = providerOverride()
+  if (forced) return forced
   if (_cachedProvider && Date.now() < _providerCacheExpiry) return _cachedProvider
   const setting = await prisma.setting.findUnique({ where: { key: 'aiProvider' } })
   const val = setting?.value

@@ -2,6 +2,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import OpenAI from 'openai'
+import { aiTimeoutMs, cliDisabled } from './tex-config'
 
 interface CodexAuth {
   auth_mode?: string
@@ -18,6 +19,7 @@ let cacheReadAt = 0
 const CACHE_TTL_MS = 60_000
 
 function readCodexAuthFile(): CodexAuth | null {
+  if (cliDisabled()) return null
   const paths = [
     join(homedir(), '.codex', 'auth.json'),
     join(homedir(), '.config', 'codex', 'auth.json'),
@@ -125,13 +127,14 @@ export function resolveOpenAIClient(options: {
     return new OpenAI({ apiKey: options.dbKey.trim(), ...(baseURL ? { baseURL } : {}) })
   }
 
+  // tex: an explicit OPENAI_API_KEY must win over a Codex CLI login.
+  const envKey = process.env.OPENAI_API_KEY?.trim()
+  if (envKey) return new OpenAI({ apiKey: envKey, timeout: aiTimeoutMs(), maxRetries: 1, ...(baseURL ? { baseURL } : {}) })
+
   const cliClient = createCodexOpenAIClient(baseURL)
   if (cliClient) return cliClient
 
-  const envKey = process.env.OPENAI_API_KEY?.trim()
-  if (envKey) return new OpenAI({ apiKey: envKey, ...(baseURL ? { baseURL } : {}) })
-
-  if (baseURL) return new OpenAI({ apiKey: 'proxy', baseURL })
+  if (baseURL) return new OpenAI({ apiKey: 'proxy', timeout: aiTimeoutMs(), maxRetries: 1, baseURL })
 
   throw new Error('No OpenAI API key found. Add your key in Settings, or set up Codex CLI.')
 }

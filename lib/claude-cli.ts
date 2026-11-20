@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'child_process'
+import { cliDisabled } from './tex-config'
 import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
@@ -63,6 +64,7 @@ export async function claudePrompt(
   prompt: string,
   options: ClaudeCliOptions = {}
 ): Promise<ClaudeCliResult<string>> {
+  if (cliDisabled()) return { success: false, error: 'CLI disabled (SIFTLY_DISABLE_CLI=1)' }
   const { model, maxTurns = 1, timeoutMs = 120_000 } = options
 
   const args = ['-p', '--output-format', 'json', '--max-turns', String(maxTurns)]
@@ -131,6 +133,7 @@ const CLI_CHECK_TTL_MS = 60_000
  * Check if CLI is available (cached for 1 minute, async).
  */
 export async function getCliAvailability(): Promise<boolean> {
+  if (cliDisabled()) return false
   const now = Date.now()
 
   // Return cached value if still valid
