@@ -70,7 +70,7 @@ describe('vision while the LLM is down', () => {
   it('does not mark the image as attempted (no imageTags = "{}")', async () => {
     const sharp = (await import('sharp')).default
     const png = await sharp({ create: { width: 2000, height: 1000, channels: 3, background: '#336699' } }).png().toBuffer()
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200, headers: { 'content-type': 'image/png' } })))
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } })))
     const { analyzeItem } = await import('@/lib/vision-analyzer')
     const down = { provider: 'openai' as const, createMessage: vi.fn(async () => { throw Object.assign(new Error('Connection error.'), { name: 'APIConnectionError' }) }) }
 
@@ -89,7 +89,7 @@ describe('vision while the LLM is down', () => {
   it('a real model error still marks the image attempted (upstream behaviour)', async () => {
     const sharp = (await import('sharp')).default
     const png = await sharp({ create: { width: 64, height: 64, channels: 3, background: '#000' } }).png().toBuffer()
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Uint8Array(png), { status: 200 })))
     const { analyzeItem } = await import('@/lib/vision-analyzer')
     const bad = { provider: 'openai' as const, createMessage: vi.fn(async () => { throw Object.assign(new Error('400 invalid image'), { status: 400 }) }) }
     await expect(analyzeItem({ id: 'm2', url: 'https://pbs.twimg.com/media/y.png', thumbnailUrl: null, type: 'photo' }, bad, 'm')).resolves.toBe(0)
