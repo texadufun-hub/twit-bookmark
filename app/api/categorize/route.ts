@@ -13,6 +13,7 @@ import {
   analyzeItem,
   runWithConcurrency,
   enrichBatchSemanticTags,
+  VISION_MAX_IMAGES_PER_BOOKMARK,
   BookmarkForEnrichment,
 } from '@/lib/vision-analyzer'
 import { backfillEntities } from '@/lib/rawjson-extractor'
@@ -316,7 +317,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
             // Vision: analyze any untagged media items (SDK or CLI)
             let anyVisionRan = false
-            for (const media of bm.mediaItems) {
+            // tex: at most 4 images per bookmark go to the model
+            for (const media of bm.mediaItems.slice(0, VISION_MAX_IMAGES_PER_BOOKMARK)) {
               if (shouldAbort()) return
               if (media.imageTags !== null) continue
               try {

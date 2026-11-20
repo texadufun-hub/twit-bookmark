@@ -1,4 +1,5 @@
 import prisma from '@/lib/db'
+import sharp from 'sharp'
 import { isLlmUnavailableError } from '@/lib/llm-health'
 import { aiConcurrency } from '@/lib/tex-config'
 import { buildImageContext } from '@/lib/image-context'
@@ -19,7 +20,21 @@ function guessMediaType(url: string, contentTypeHeader: string | null): AllowedM
   return 'image/jpeg'
 }
 
-const MAX_IMAGE_BYTES = 3_500_000 // 3.5MB raw → ~4.7MB base64, under Claude's 5MB limit
+const MAX_IMAGE_BYTES = 20_000_000 // tex: download cap; images are downscaled before sending
+/** tex: long side sent to the model, and max images analyzed per bookmark */
+export const VISION_MAX_SIDE = 1024
+export const VISION_MAX_IMAGES_PER_BOOKMARK = 4
+
+/** tex: downscale to <=1024 px long side, JPEG. GIFs/WebP use their first frame. */
+export async function downscaleForVision(input: Buffer): Promise<{ data: string; mediaType: AllowedMediaType }> {
+  const out = await sharp(input, { animated: false })
+    .rotate() // honour EXIF orientation
+    .resize({ width: VISION_MAX_SIDE, height: VISION_MAX_SIDE, fit: 'inside', withoutEnlargement: true })
+    .flatten({ background: '#ffffff' })
+    .jpeg({ quality: 82 })
+    .toBuffer()
+  return { data: out.toString('base64'), mediaType: 'image/jpeg' }
+}
 
 async function fetchImageAsBase64(
   url: string,
@@ -30,7 +45,7 @@ async function fetchImageAsBase64(
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
         Referer: 'https://twitter.com/',
       },
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(20_000), // tex: was 4 s
     })
     if (!res.ok) return null
     const buffer = await res.arrayBuffer()
@@ -39,8 +54,7 @@ async function fetchImageAsBase64(
       console.warn(`[vision] skipping oversized image (${Math.round(buffer.byteLength / 1024)}KB): ${url.slice(0, 80)}`)
       return null
     }
-    const mediaType = guessMediaType(url, res.headers.get('content-type'))
-    return { data: Buffer.from(buffer).toString('base64'), mediaType }
+    return await downscaleForVision(Buffer.from(buffer))
   } catch {
     return null
   }
