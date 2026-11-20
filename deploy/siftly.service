@@ -1,0 +1,35 @@
+# tex: Siftly X-bookmarks archive on port 8097, against the local Strata LLM.
+# Install: sudo install -m 644 deploy/siftly.service /etc/systemd/system/siftly.service
+[Unit]
+Description=Siftly (X bookmarks archive)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tex
+Group=tex
+WorkingDirectory=/home/tex/agents/twitter
+EnvironmentFile=/home/tex/.config/siftly.env
+Environment=PATH=/usr/bin:/bin
+# Loads OPENAI_API_KEY from ~/.config/strata-api-key (mode 600) and execs next start -H 0.0.0.0 -p 8097
+ExecStart=/home/tex/agents/twitter/scripts/tex-start.sh
+Restart=on-failure
+RestartSec=10
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/tex/.local/share/siftly /home/tex/agents/twitter/.next
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Credentials the app must never touch (Claude/Codex CLI logins, other keys, ssh)
+InaccessiblePaths=-/home/tex/.claude -/home/tex/.codex -/home/tex/.config/codex -/home/tex/.config/qwen-keys -/home/tex/.config/qwen-api-key -/home/tex/.ssh
+
+[Install]
+WantedBy=multi-user.target
