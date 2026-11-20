@@ -22,6 +22,7 @@ interface CategorizeStatus {
   stageCounts: StageCounts
   lastError: string | null
   error: string | null
+  llm?: { status: 'ok' | 'unavailable'; reason: string | null; nextCheckAt: string | null }
 }
 
 const STAGE_INFO: Record<NonNullable<Stage>, { label: string; icon: React.ReactNode; desc: string }> = {
@@ -227,6 +228,16 @@ export default function CategorizePage() {
               <StopCircle size={15} />
               {stopping ? 'Stopping…' : 'Stop pipeline'}
             </button>
+
+            {/* tex: paused because the local LLM is off or another model is loaded */}
+            {status?.llm?.status === 'unavailable' && (
+              <p className="text-xs text-sky-300 bg-sky-500/10 border border-sky-500/20 rounded-lg px-3 py-2">
+                LLM unavailable, retrying
+                {status.llm.nextCheckAt ? ` at ${new Date(status.llm.nextCheckAt).toLocaleTimeString()}` : ' shortly'}
+                {' '}— nothing is marked as failed.
+                {status.llm.reason && <span className="block text-sky-400/70 mt-0.5">{status.llm.reason}</span>}
+              </p>
+            )}
 
             {/* Last error warning */}
             {status?.lastError && (

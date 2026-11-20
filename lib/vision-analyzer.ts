@@ -1,4 +1,6 @@
 import prisma from '@/lib/db'
+import { isLlmUnavailableError } from '@/lib/llm-health'
+import { aiConcurrency } from '@/lib/tex-config'
 import { buildImageContext } from '@/lib/image-context'
 import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
 import { getCodexCliAvailability, codexPrompt } from '@/lib/codex-cli'
@@ -68,7 +70,7 @@ Rules:
 - GOOD tags: "bitcoin price chart", "react hooks", "frustrated man", "gpt-4", "bull market"`
 
 const RETRY_DELAYS_MS = [1500, 4000, 10000]
-const CONCURRENCY = 12
+const CONCURRENCY = aiConcurrency() // tex: was 12; the shared limiter enforces the real cap
 
 /**
  * CLI-based vision analysis: passes the image URL in the prompt text.
@@ -137,6 +139,8 @@ async function analyzeImageWithRetry(
     JSON.parse(jsonMatch[0]) // throws if invalid
     return jsonMatch[0]
   } catch (err) {
+    // tex: the server being down is not a property of this image — don't mark it attempted.
+    if (isLlmUnavailableError(err)) throw err
     const errMsg = err instanceof Error ? err.message : String(err)
     // Never retry client errors (4xx) — bad request, invalid image, too large, etc.
     const isClientError = errMsg.includes('400') || errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('422')
@@ -316,7 +320,7 @@ export async function analyzeAllUntagged(
 // ── Batch semantic enrichment ──────────────────────────────────────────────────
 
 const ENRICH_BATCH_SIZE = 5
-const ENRICH_CONCURRENCY = 2
+const ENRICH_CONCURRENCY = aiConcurrency() // tex: was 2
 
 export interface BookmarkForEnrichment {
   id: string
@@ -437,6 +441,7 @@ export async function enrichBatchSemanticTags(
       if (results.length > 0) return results
       console.warn(`[enrich] no JSON array in response (attempt ${attempt + 1})`)
     } catch (err) {
+      if (isLlmUnavailableError(err)) throw err // tex: pause the pipeline instead of giving up
       const errMsg = err instanceof Error ? err.message : String(err)
       console.warn(`[enrich] batch failed (attempt ${attempt + 1}): ${errMsg.slice(0, 120)}`)
       const isClientError = errMsg.includes('400') || errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('422')

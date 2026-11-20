@@ -17,6 +17,8 @@ import {
 } from '@/lib/vision-analyzer'
 import { backfillEntities } from '@/lib/rawjson-extractor'
 import { rebuildFts } from '@/lib/fts'
+import { isLlmUnavailableError, waitForLlm } from '@/lib/llm-health'
+import { aiConcurrency } from '@/lib/tex-config'
 
 type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel'
 
@@ -33,7 +35,11 @@ interface CategorizationState {
   }
   lastError: string | null
   error: string | null
+  /** tex: shown in the UI while the pipeline is paused waiting for the local LLM */
+  llm: { status: 'ok' | 'unavailable'; reason: string | null; nextCheckAt: string | null }
 }
+
+const LLM_OK: CategorizationState['llm'] = { status: 'ok', reason: null, nextCheckAt: null }
 
 // In-memory state for progress tracking across requests
 const globalState = globalThis as unknown as {
@@ -50,6 +56,7 @@ if (!globalState.categorizationState) {
     stageCounts: { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 },
     lastError: null,
     error: null,
+    llm: LLM_OK,
   }
 }
 if (globalState.categorizationAbort === undefined) {
@@ -68,6 +75,16 @@ function setState(update: Partial<CategorizationState>): void {
   globalState.categorizationState = { ...globalState.categorizationState, ...update }
 }
 
+/** tex: wait until the LLM answers (pauses the pipeline). Returns false if the user stopped it. */
+async function llmGate(): Promise<boolean> {
+  return waitForLlm({
+    shouldAbort,
+    onUnavailable: (reason, next) =>
+      setState({ llm: { status: 'unavailable', reason, nextCheckAt: next.toISOString() } }),
+    onAvailable: () => setState({ llm: LLM_OK }),
+  })
+}
+
 export async function GET(): Promise<NextResponse> {
   const state = getState()
   return NextResponse.json({
@@ -76,6 +93,7 @@ export async function GET(): Promise<NextResponse> {
     done: state.done,
     total: state.total,
     stageCounts: state.stageCounts,
+    llm: state.llm ?? LLM_OK,
     lastError: state.lastError,
     error: state.error,
   })
@@ -91,7 +109,7 @@ export async function DELETE(): Promise<NextResponse> {
   return NextResponse.json({ stopped: true })
 }
 
-const PIPELINE_WORKERS = 5
+const PIPELINE_WORKERS = aiConcurrency() // tex: was 5
 const CAT_BATCH_SIZE = 25
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -99,7 +117,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Categorization is already running' }, { status: 409 })
   }
 
-  let body: { bookmarkIds?: string[]; apiKey?: string; force?: boolean } = {}
+  let body: { bookmarkIds?: string[]; apiKey?: string; force?: boolean; limit?: number } = {}
   try {
     const text = await request.text()
     if (text.trim()) body = JSON.parse(text)
@@ -108,6 +126,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const { bookmarkIds = [], apiKey, force = false } = body
+  // tex: process only the first N bookmarks of this run (e.g. a 20-bookmark trial)
+  const limit = Number.isInteger(body.limit) && (body.limit as number) > 0 ? (body.limit as number) : null
 
   if (apiKey && typeof apiKey === 'string' && apiKey.trim() !== '') {
     const currentProvider = await getProvider()
@@ -133,6 +153,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   } catch {
     total = 0
   }
+  if (limit) total = Math.min(total, limit)
 
   setState({
     status: 'running',
@@ -142,6 +163,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     stageCounts: { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 },
     lastError: null,
     error: null,
+    llm: LLM_OK,
   })
 
   const provider = await getProvider()
@@ -199,6 +221,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             bookmarkIdsToProcess = unprocessed.map((b) => b.id)
           }
 
+          if (limit) bookmarkIdsToProcess = bookmarkIdsToProcess.slice(0, limit)
           const runTotal = bookmarkIdsToProcess.length
           setState({ stage: 'parallel', done: 0, total: runTotal, stageCounts: { ...counts } })
 
@@ -232,6 +255,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 if (!final && catPending.length < CAT_BATCH_SIZE) break
                 const ids = catPending.splice(0, CAT_BATCH_SIZE)
                 if (ids.length === 0) break
+                if (!(await llmGate())) { catPending.unshift(...ids); break }
                 const rows = await prisma.bookmark.findMany({
                   where: { id: { in: ids } },
                   select: BOOKMARK_SELECT,
@@ -243,6 +267,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                   counts.categorized += ids.length
                   setState({ stageCounts: { ...counts } })
                 } catch (catErr) {
+                  if (isLlmUnavailableError(catErr)) {
+                    // tex: put the batch back and wait; never drop it because the server was down
+                    catPending.unshift(...ids)
+                    if (!(await llmGate())) break
+                    continue
+                  }
                   console.error('[parallel] categorize batch error:', catErr)
                 }
               }
@@ -254,6 +284,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           let processedCount = 0
 
           async function processBookmark(bookmarkId: string): Promise<void> {
+            for (;;) {
+              if (!(await llmGate())) return
+              try {
+                return await processBookmarkOnce(bookmarkId)
+              } catch (err) {
+                if (!isLlmUnavailableError(err)) throw err
+                console.warn('[parallel] LLM went away while processing', bookmarkId, '- will retry it')
+                setState({ llm: { status: 'unavailable', reason: err instanceof Error ? err.message.slice(0, 120) : String(err), nextCheckAt: null } })
+              }
+            }
+          }
+
+          async function processBookmarkOnce(bookmarkId: string): Promise<void> {
             if (shouldAbort()) return
 
             const bm = await prisma.bookmark.findUnique({
@@ -286,6 +329,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 counts.visionTagged++
                 setState({ stageCounts: { ...counts } })
               } catch (err) {
+                if (isLlmUnavailableError(err)) throw err
                 console.warn('[parallel] vision failed for', media.id, err instanceof Error ? err.message : err)
               }
             }
@@ -338,6 +382,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                     setState({ stageCounts: { ...counts } })
                   }
                 } catch (err) {
+                  if (isLlmUnavailableError(err)) throw err
                   console.warn('[parallel] enrichment failed for', bm.id, err instanceof Error ? err.message : err)
                 }
               }
