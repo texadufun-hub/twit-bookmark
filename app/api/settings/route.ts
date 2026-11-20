@@ -31,7 +31,7 @@ const ALLOWED_MINIMAX_MODELS = [
 
 export async function GET(): Promise<NextResponse> {
   try {
-    const [anthropic, anthropicModel, provider, openai, openaiModel, minimax, minimaxModel, xClientId, xClientSecret, obsidianVault] = await Promise.all([
+    const [anthropic, anthropicModel, provider, openai, openaiModel, minimax, minimaxModel, xClientId, xClientSecret, obsidianVault, aiSearchRerank] = await Promise.all([
       prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } }),
       prisma.setting.findUnique({ where: { key: 'anthropicModel' } }),
       prisma.setting.findUnique({ where: { key: 'aiProvider' } }),
@@ -42,6 +42,7 @@ export async function GET(): Promise<NextResponse> {
       prisma.setting.findUnique({ where: { key: 'x_oauth_client_id' } }),
       prisma.setting.findUnique({ where: { key: 'x_oauth_client_secret' } }),
       prisma.setting.findUnique({ where: { key: 'obsidianVaultPath' } }),
+      prisma.setting.findUnique({ where: { key: 'aiSearchRerank' } }),
     ])
 
     return NextResponse.json({
@@ -59,6 +60,7 @@ export async function GET(): Promise<NextResponse> {
       xOAuthClientSecret: maskKey(xClientSecret?.value ?? null),
       hasXOAuth: !!xClientId?.value,
       obsidianVaultPath: obsidianVault?.value ?? null,
+      aiSearchRerank: aiSearchRerank?.value === 'true', // tex: default off
     })
   } catch (err) {
     console.error('Settings GET error:', err)
@@ -81,6 +83,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     xOAuthClientId?: string
     xOAuthClientSecret?: string
     obsidianVaultPath?: string
+    aiSearchRerank?: boolean
   } = {}
   try {
     body = await request.json()
@@ -89,6 +92,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const { anthropicApiKey, anthropicModel, provider, openaiApiKey, openaiModel, minimaxApiKey, minimaxModel } = body
+
+  // tex: toggle AI reranking for AI Search (off = keyword/FTS results only, no LLM call)
+  if (typeof body.aiSearchRerank === 'boolean') {
+    const value = body.aiSearchRerank ? 'true' : 'false'
+    await prisma.setting.upsert({ where: { key: 'aiSearchRerank' }, update: { value }, create: { key: 'aiSearchRerank', value } })
+    return NextResponse.json({ saved: true })
+  }
 
   // Save provider if provided
   if (provider !== undefined) {

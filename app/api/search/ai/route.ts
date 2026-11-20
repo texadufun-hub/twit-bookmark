@@ -6,6 +6,7 @@ import { getActiveModel, getProvider } from '@/lib/settings'
 import { extractKeywords } from '@/lib/search-utils'
 import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
 import { getCodexCliAvailability, codexPrompt } from '@/lib/codex-cli'
+import { SEARCH_RERANK_TIMEOUT_MS } from '@/lib/tex-config'
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 interface CacheEntry { results: unknown; expiresAt: number }
@@ -276,6 +277,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (!seen.has(b.id)) { seen.add(b.id); merged.push(b) }
   }
 
+  // tex: real matches, ranked (FTS order first). Used when reranking is off or fails.
+  const keywordMatches = merged.slice(0, 50)
+
   // If still very few candidates, pull a recent sample so Claude has something to work with
   let bookmarks = merged
   if (bookmarks.length < 20) {
@@ -296,6 +300,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (bookmarks.length === 0) {
     return NextResponse.json({ bookmarks: [], explanation: 'No bookmarks found.' })
   }
+
+  // tex: search must never depend on the LLM.
+  const ftsOnly = (explanation: string) => ({
+    matches: keywordMatches.map((b, i) => ({ id: b.id, score: Math.max(1, 10 - Math.floor((i * 10) / Math.max(keywordMatches.length, 1))), reason: 'keyword match' })),
+    explanation,
+  })
+  const rerankEnabled = (await prisma.setting.findUnique({ where: { key: 'aiSearchRerank' } }))?.value === 'true'
 
   // ── Step 2: Build rich search index ───────────────────────────────────────
   const indexEntries = bookmarks.map(buildIndexEntry)
@@ -352,7 +363,11 @@ Constraints:
 
   // Try CLI first (works with ChatGPT OAuth), then fall back to SDK
   let cliSucceeded = false
-  if (provider === 'openai' && await getCodexCliAvailability()) {
+  let rerankFailed = false
+  if (!rerankEnabled) {
+    aiResponse = ftsOnly(keywordMatches.length ? 'Keyword matches (AI reranking is off).' : 'No keyword matches.')
+    cliSucceeded = true // skip the LLM below
+  } else if (provider === 'openai' && await getCodexCliAvailability()) {
     try {
       const result = await codexPrompt(prompt, { timeoutMs: 90_000 })
       if (result.success && result.data) {
@@ -372,21 +387,25 @@ Constraints:
   }
 
   if (!cliSucceeded) {
-    if (!client) {
-      return NextResponse.json({ error: 'No CLI available and no API key configured. Add an API key in Settings or install Codex/Claude CLI.' }, { status: 400 })
-    }
     try {
+      if (!client) throw new Error('no AI client configured')
+      // tex: one 20 s budget for queueing behind pipeline calls + the request itself
+      const started = Date.now()
       const response = await client.createMessage({
         model,
         max_tokens: 1500,
         messages: [{ role: 'user', content: prompt }],
+        waitTimeoutMs: SEARCH_RERANK_TIMEOUT_MS,
+        get timeoutMs() { return Math.max(1_000, SEARCH_RERANK_TIMEOUT_MS - (Date.now() - started)) },
       })
-      const rawText = response.text ?? '{}'
-      aiResponse = parseSearchResponse(rawText)
+      const parsed = parseSearchResponse(response.text ?? '{}')
+      if (!Array.isArray(parsed.matches)) throw new Error('reranker returned no matches array')
+      aiResponse = parsed
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)
-      console.error('AI search error:', errMsg)
-      return NextResponse.json({ error: `AI search failed: ${errMsg}` }, { status: 500 })
+      console.warn('AI search rerank failed, falling back to keyword results:', errMsg.slice(0, 160))
+      rerankFailed = true
+      aiResponse = ftsOnly(`AI reranking unavailable (${errMsg.slice(0, 80)}); showing keyword matches.`)
     }
   }
 
@@ -421,6 +440,6 @@ Constraints:
     .filter(Boolean)
 
   const response = { bookmarks: results, explanation: aiResponse.explanation }
-  setCache(cacheKey, response)
+  if (!rerankFailed) setCache(cacheKey, response) // tex: don't pin a fallback for 5 min
   return NextResponse.json(response)
 }

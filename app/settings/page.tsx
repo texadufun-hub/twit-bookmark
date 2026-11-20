@@ -1285,6 +1285,35 @@ function XOAuthSection({ onToast }: { onToast: (t: Toast) => void }) {
   )
 }
 
+// tex: AI Search reranking calls the LLM on every query; off by default so search never waits on it.
+function SearchRerankSection({ onToast }: { onToast: (t: Toast) => void }) {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  useEffect(() => {
+    fetch('/api/settings')
+      .then((r) => r.json())
+      .then((d: { aiSearchRerank?: boolean }) => setEnabled(!!d.aiSearchRerank))
+      .catch(() => setEnabled(false))
+  }, [])
+  async function toggle(next: boolean) {
+    setEnabled(next)
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aiSearchRerank: next }),
+    })
+    onToast(res.ok ? { type: 'success', message: next ? 'AI reranking on' : 'AI reranking off' } : { type: 'error', message: 'Could not save' })
+    if (!res.ok) setEnabled(!next)
+  }
+  return (
+    <Section icon={Zap} title="AI Search reranking" description="When on, AI Search asks the LLM to rerank keyword matches (up to 20 s, then falls back to keyword results). When off, AI Search returns keyword (FTS) matches only.">
+      <label className="flex items-center gap-2 text-sm text-zinc-300">
+        <input type="checkbox" checked={!!enabled} disabled={enabled === null} onChange={(e) => toggle(e.target.checked)} />
+        Rerank AI Search results with the LLM
+      </label>
+    </Section>
+  )
+}
+
 export default function SettingsPage() {
   const [toast, setToast] = useState<Toast | null>(null)
 
@@ -1312,6 +1341,7 @@ export default function SettingsPage() {
 
       <div className="space-y-4">
         <ApiKeySection onToast={showToast} />
+        <SearchRerankSection onToast={showToast} />
         <XOAuthSection onToast={showToast} />
         <DataSection />
         <ObsidianExportBlock onToast={showToast} />
