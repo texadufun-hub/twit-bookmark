@@ -270,6 +270,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       : prisma.bookmark.findMany({ where: { id: 'never' }, select: selectShape }),
   ])
 
+  // tex: `id IN (...)` returns rows in table order; restore the FTS rank order
+  if (useFts) {
+    const rank = new Map(ftsIds.map((id, i) => [id, i]))
+    keywordHits.sort((a, b) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9))
+  }
+
   // Merge: keyword hits first (more specific), then intent hits, dedup by id
   const seen = new Set<string>()
   const merged: typeof keywordHits = []
