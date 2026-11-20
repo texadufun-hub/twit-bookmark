@@ -977,12 +977,10 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
           setRunning(true)
           setStopping(data.status === 'stopping')
           pollStatus()
-        } else {
-          // Start a fresh pipeline for the newly imported bookmarks
-          void startCategorization(force)
         }
+        // tex: no auto-start; processing is started by hand (button below)
       } catch {
-        void startCategorization(force)
+        /* status unavailable — the Start button still works */
       }
     })()
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1055,6 +1053,19 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
 
   return (
     <div className="space-y-6">
+      {/* tex: imports never start the LLM pipeline by themselves */}
+      {!running && !done && !error && (
+        <div className="space-y-3">
+          <p className="text-sm text-zinc-400">Import finished. AI processing (images, tags, categories, summaries) does not start automatically.</p>
+          <button
+            onClick={() => void startCategorization(force)}
+            className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors"
+          >
+            Start AI processing
+          </button>
+        </div>
+      )}
+
       {!running && !done && error && (
         <div className="space-y-3">
           <p className="text-sm text-red-400">{error}</p>
