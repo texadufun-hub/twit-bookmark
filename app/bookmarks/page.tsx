@@ -30,6 +30,7 @@ interface Filters {
   category: string
   mediaType: string
   source: string
+  action: string
   sort: string
   page: number
   uncategorized: boolean
@@ -40,6 +41,7 @@ const DEFAULT_FILTERS: Filters = {
   category: '',
   mediaType: '',
   source: '',
+  action: '',
   sort: 'newest',
   page: 1,
   uncategorized: false,
@@ -55,6 +57,7 @@ function buildUrl(filters: Filters, limit: number): string {
   }
   if (filters.mediaType) params.set('mediaType', filters.mediaType)
   if (filters.source) params.set('source', filters.source)
+  if (filters.action) params.set('action', filters.action)
   params.set('sort', filters.sort)
   params.set('page', String(filters.page))
   params.set('limit', String(limit))
@@ -209,6 +212,7 @@ function BookmarksPageInner() {
     uncategorized: searchParams.get('uncategorized') === 'true',
     category: searchParams.get('category') ?? '',
     mediaType: searchParams.get('mediaType') ?? '',
+    action: searchParams.get('action') ?? '',
     q: searchParams.get('q') ?? '',
   }))
   const [searchInput, setSearchInput] = useState('')
@@ -269,6 +273,15 @@ function BookmarksPageInner() {
     { label: 'Videos', value: 'video' },
   ]
 
+  // tex: summary action filter
+  const actionOptions = [
+    { label: 'Read', value: 'read' },
+    { label: 'Try', value: 'try' },
+    { label: 'Reference', value: 'reference' },
+    { label: 'Discard', value: 'discard' },
+    { label: 'Needs review', value: 'needsReview' },
+  ]
+
   const sourceOptions = [
     { label: 'Bookmarks', value: 'bookmark' },
     { label: 'Likes', value: 'like' },
@@ -279,7 +292,7 @@ function BookmarksPageInner() {
     { label: 'Oldest first', value: 'oldest' },
   ]
 
-  const hasActiveFilters = !!(filters.q || filters.category || filters.mediaType || filters.source || filters.sort !== 'newest' || filters.uncategorized)
+  const hasActiveFilters = !!(filters.q || filters.category || filters.mediaType || filters.source || filters.action || filters.sort !== 'newest' || filters.uncategorized)
 
   const sortLabel = sortOptions.find((o) => o.value === filters.sort)?.label ?? 'Newest first'
 
@@ -317,6 +330,14 @@ function BookmarksPageInner() {
               onChange={(v) => updateFilter('mediaType', v)}
               options={mediaOptions}
               placeholder="All media"
+            />
+
+            {/* tex: Action */}
+            <SelectMenu
+              value={filters.action}
+              onChange={(v) => updateFilter('action', v)}
+              options={actionOptions}
+              placeholder="Any action"
             />
 
             {/* Source */}

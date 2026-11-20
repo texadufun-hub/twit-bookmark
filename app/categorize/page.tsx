@@ -2,16 +2,18 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
-import { Sparkles, Loader2, CheckCircle, ChevronRight, Eye, Tag, Brain, Layers, StopCircle } from 'lucide-react'
+import { Sparkles, Loader2, CheckCircle, ChevronRight, Eye, Tag, Brain, Layers, StopCircle, FileText } from 'lucide-react'
 import * as Progress from '@radix-ui/react-progress'
 
-type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel' | null
+type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel' | 'summarize' | null
 
 interface StageCounts {
   visionTagged: number
   entitiesExtracted: number
   enriched: number
   categorized: number
+  summarized?: number
+  needsReview?: number
 }
 
 interface CategorizeStatus {
@@ -49,7 +51,12 @@ const STAGE_INFO: Record<NonNullable<Stage>, { label: string; icon: React.ReactN
   parallel: {
     label: 'Processing all stages in parallel',
     icon: <Sparkles size={14} />,
-    desc: 'Vision, enrichment, and categorization running concurrently across 20 workers',
+    desc: 'Vision, enrichment and categorization, one LLM request at a time',
+  },
+  summarize: {
+    label: 'Summarizing',
+    icon: <FileText size={14} />,
+    desc: 'Writing a summary, one-liner, key points and action for each bookmark',
   },
 }
 
@@ -82,6 +89,25 @@ export default function CategorizePage() {
     try {
       await fetch('/api/categorize', { method: 'DELETE' })
     } catch { /* ignore */ }
+  }
+
+  async function startSummaries(scope: 'missing' | 'needsReview' | 'all') {
+    setError('')
+    setRunning(true)
+    setStopping(false)
+    setDone(false)
+    try {
+      const res = await fetch('/api/categorize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ summaryOnly: true, summaryScope: scope }),
+      })
+      if (!res.ok) throw new Error(((await res.json()) as { error?: string }).error ?? 'Failed to start')
+      pollStatus()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start')
+      setRunning(false)
+    }
   }
 
   async function startCategorization(force = false) {
@@ -172,6 +198,22 @@ export default function CategorizePage() {
               >
                 Re-run everything (force all)
               </button>
+              {/* tex: bulk (re-)summarize without re-running the other stages */}
+              <div className="grid grid-cols-3 gap-2 pt-1">
+                {([
+                  ['missing', 'Summarize missing'],
+                  ['needsReview', 'Re-summarize needs-review'],
+                  ['all', 'Re-summarize all'],
+                ] as const).map(([scope, label]) => (
+                  <button
+                    key={scope}
+                    onClick={() => void startSummaries(scope)}
+                    className="py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 text-xs font-medium transition-colors border border-zinc-700"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
           </>
         )}
@@ -198,8 +240,10 @@ export default function CategorizePage() {
                   { key: 'entitiesExtracted', label: 'entities extracted', icon: <Tag size={13} />, active: status.stage === 'entities' },
                   { key: 'enriched', label: 'bookmarks enriched', icon: <Brain size={13} />, active: status.stage === 'enrichment' || status.stage === 'parallel' },
                   { key: 'categorized', label: 'categorized', icon: <Layers size={13} />, active: status.stage === 'categorize' || status.stage === 'parallel' },
+                  { key: 'summarized', label: 'summarized', icon: <FileText size={13} />, active: status.stage === 'summarize' },
+                  { key: 'needsReview', label: 'summaries need review', icon: <FileText size={13} />, active: false },
                 ].map(({ key, label, icon, active }) => {
-                  const count = status.stageCounts[key as keyof StageCounts]
+                  const count = status.stageCounts[key as keyof StageCounts] ?? 0
                   const total = key === 'categorized' ? status.total : null
                   return (
                     <div key={key} className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors ${active ? 'bg-indigo-500/8 border-indigo-500/20' : 'bg-zinc-800/40 border-zinc-700/30'}`}>

@@ -20,8 +20,9 @@ import { backfillEntities } from '@/lib/rawjson-extractor'
 import { rebuildFts } from '@/lib/fts'
 import { isLlmUnavailableError, waitForLlm } from '@/lib/llm-health'
 import { aiConcurrency } from '@/lib/tex-config'
+import { summarizeBookmark } from '@/lib/summarizer'
 
-type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel'
+type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel' | 'summarize'
 
 interface CategorizationState {
   status: 'idle' | 'running' | 'stopping'
@@ -33,6 +34,8 @@ interface CategorizationState {
     entitiesExtracted: number
     enriched: number
     categorized: number
+    summarized?: number
+    needsReview?: number
   }
   lastError: string | null
   error: string | null
@@ -54,7 +57,7 @@ if (!globalState.categorizationState) {
     stage: null,
     done: 0,
     total: 0,
-    stageCounts: { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 },
+    stageCounts: { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0, summarized: 0, needsReview: 0 },
     lastError: null,
     error: null,
     llm: LLM_OK,
@@ -74,6 +77,13 @@ function getState(): CategorizationState {
 
 function setState(update: Partial<CategorizationState>): void {
   globalState.categorizationState = { ...globalState.categorizationState, ...update }
+}
+
+/** tex: which bookmarks a summary run targets */
+function summaryWhere(scope: 'missing' | 'needsReview' | 'all') {
+  if (scope === 'all') return {}
+  if (scope === 'needsReview') return { summaryStatus: 'needsReview' }
+  return { OR: [{ summaryStatus: null }, { summaryStatus: 'needsReview' }] }
 }
 
 /** tex: wait until the LLM answers (pauses the pipeline). Returns false if the user stopped it. */
@@ -118,7 +128,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Categorization is already running' }, { status: 409 })
   }
 
-  let body: { bookmarkIds?: string[]; apiKey?: string; force?: boolean; limit?: number } = {}
+  let body: { bookmarkIds?: string[]; apiKey?: string; force?: boolean; limit?: number; summaryOnly?: boolean; summaryScope?: 'missing' | 'needsReview' | 'all' } = {}
   try {
     const text = await request.text()
     if (text.trim()) body = JSON.parse(text)
@@ -127,6 +137,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const { bookmarkIds = [], apiKey, force = false } = body
+  // tex: summaryOnly skips vision/enrichment/categorization and (re)summarizes bookmarks
+  const summaryOnly = body.summaryOnly === true
+  const summaryScope = body.summaryScope === 'all' || body.summaryScope === 'needsReview' ? body.summaryScope : 'missing'
   // tex: process only the first N bookmarks of this run (e.g. a 20-bookmark trial)
   const limit = Number.isInteger(body.limit) && (body.limit as number) > 0 ? (body.limit as number) : null
 
@@ -144,7 +157,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let total = 0
   try {
-    if (bookmarkIds.length > 0) {
+    if (summaryOnly) {
+      total = bookmarkIds.length > 0 ? bookmarkIds.length : await prisma.bookmark.count({ where: summaryWhere(summaryScope) })
+    } else if (bookmarkIds.length > 0) {
       total = bookmarkIds.length
     } else if (force) {
       total = await prisma.bookmark.count()
@@ -161,7 +176,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     stage: 'entities',
     done: 0,
     total,
-    stageCounts: { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 },
+    stageCounts: { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0, summarized: 0, needsReview: 0 },
     lastError: null,
     error: null,
     llm: LLM_OK,
@@ -173,7 +188,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     (await prisma.setting.findUnique({ where: { key: keyName } }))?.value?.trim() || ''
 
   void (async () => {
-    const counts = { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 }
+    const counts = { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0, summarized: 0, needsReview: 0 }
+    const processedIds: string[] = []
 
     try {
       let client: AIClient | null = null
@@ -186,13 +202,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
         await seedDefaultCategories()
 
-        if (force) {
+        if (force && !summaryOnly) {
           await prisma.mediaItem.updateMany({ where: { imageTags: '{}' }, data: { imageTags: null } })
           await prisma.bookmark.updateMany({ where: { semanticTags: '[]' }, data: { semanticTags: null } })
         }
 
         // Stage 1: Entity extraction (free, fast — no API calls)
-        if (!shouldAbort()) {
+        if (!summaryOnly && !shouldAbort()) {
           setState({ stage: 'entities' })
           counts.entitiesExtracted = await backfillEntities((n) => {
             counts.entitiesExtracted = n
@@ -205,7 +221,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         }
 
         // Stage 2: Parallel pipeline — vision + enrichment + categorize per bookmark
-        if (!shouldAbort()) {
+        if (!summaryOnly && !shouldAbort()) {
           // Fetch all bookmark IDs to process
           let bookmarkIdsToProcess: string[]
           if (bookmarkIds.length > 0) {
@@ -392,6 +408,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
             // Queue for categorization
             catPending.push(bm.id)
+            processedIds.push(bm.id)
             processedCount++
             setState({ done: processedCount, stageCounts: { ...counts } })
             await drainCategorizeQueue()
@@ -404,6 +421,48 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           } finally {
             // Always drain remaining items even if some workers threw
             await drainCategorizeQueue(true)
+          }
+        }
+
+        // Stage 3 (tex): per-bookmark summaries — one LLM call each, after categorization
+        if (!shouldAbort() && client) {
+          let ids: string[]
+          if (summaryOnly) {
+            ids = bookmarkIds.length > 0
+              ? bookmarkIds
+              : (await prisma.bookmark.findMany({ where: summaryWhere(summaryScope), select: { id: true }, orderBy: { id: 'asc' } })).map((b) => b.id)
+          } else if (bookmarkIds.length > 0 || limit) {
+            ids = processedIds.filter((id, i, a) => a.indexOf(id) === i)
+            if (!force) {
+              const done = await prisma.bookmark.findMany({ where: { id: { in: ids }, summaryStatus: 'ok' }, select: { id: true } })
+              const doneSet = new Set(done.map((d) => d.id))
+              ids = ids.filter((id) => !doneSet.has(id))
+            }
+          } else {
+            ids = (await prisma.bookmark.findMany({ where: force ? {} : summaryWhere('missing'), select: { id: true }, orderBy: { id: 'asc' } })).map((b) => b.id)
+          }
+          const summaryModel = await getActiveModel()
+          setState({ stage: 'summarize', done: 0, total: ids.length, stageCounts: { ...counts } })
+          let summarizedSoFar = 0
+          for (const id of ids) {
+            if (shouldAbort()) break
+            for (;;) {
+              if (!(await llmGate())) break
+              try {
+                const outcome = await summarizeBookmark(client, summaryModel, id)
+                if (outcome?.status === 'ok') counts.summarized++
+                else if (outcome) counts.needsReview++
+                break
+              } catch (err) {
+                if (!isLlmUnavailableError(err)) {
+                  console.error('[summarize] unexpected error for', id, err instanceof Error ? err.message : err)
+                  break
+                }
+                setState({ llm: { status: 'unavailable', reason: err instanceof Error ? err.message.slice(0, 120) : String(err), nextCheckAt: null } })
+              }
+            }
+            summarizedSoFar++
+            setState({ done: summarizedSoFar, stageCounts: { ...counts } })
           }
         }
     } catch (err) {

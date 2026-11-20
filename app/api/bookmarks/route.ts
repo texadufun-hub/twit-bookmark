@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
+import { ftsMatchIds } from '@/lib/fts'
 
 const DEFAULT_PAGE = 1
 const DEFAULT_LIMIT = 24
@@ -51,8 +52,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   if (q) {
-    where.text = { contains: q }
+    // tex: plain text match as before, plus FTS over tags, image analysis and summaries
+    const ftsIds = await ftsMatchIds(q)
+    where.OR = ftsIds.length ? [{ text: { contains: q } }, { id: { in: ftsIds } }] : undefined
+    if (!ftsIds.length) where.text = { contains: q }
   }
+
+  // tex: summary action filter (read|try|reference|discard), or needsReview
+  const action = searchParams.get('action')?.trim() ?? ''
+  if (action === 'needsReview') where.summaryStatus = 'needsReview'
+  else if (['read', 'try', 'reference', 'discard'].includes(action)) where.action = action
 
   if (uncategorized) {
     where.categories = { none: {} }
@@ -103,6 +112,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       authorHandle: bookmark.authorHandle,
       authorName: bookmark.authorName,
       source: bookmark.source,
+      oneLine: bookmark.oneLine,
+      action: bookmark.action,
+      summaryStatus: bookmark.summaryStatus,
       tweetCreatedAt: bookmark.tweetCreatedAt?.toISOString() ?? null,
       importedAt: bookmark.importedAt.toISOString(),
       mediaItems: bookmark.mediaItems.map((m) => ({

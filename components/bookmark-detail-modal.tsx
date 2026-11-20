@@ -3,6 +3,7 @@
 import { useEffect, useCallback } from 'react'
 import { X } from 'lucide-react'
 import BookmarkCard from '@/components/bookmark-card'
+import SummaryPanel from '@/components/summary-panel'
 import type { BookmarkWithMedia } from '@/lib/types'
 
 interface BookmarkDetailModalProps {
@@ -41,6 +42,7 @@ export default function BookmarkDetailModal({ bookmark, onClose }: BookmarkDetai
           <X size={18} />
         </button>
         <BookmarkCard bookmark={bookmark} />
+        <SummaryPanel bookmarkId={bookmark.id} />
       </div>
     </div>
   )
