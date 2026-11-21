@@ -209,10 +209,16 @@ ${JSON.stringify(tweetData, null, 1)}`
 }
 
 function parseCategorizationResponse(text: string, validSlugs: Set<string>): CategorizationResult[] {
-  const jsonMatch = text.match(/\[[\s\S]*\]/)
-  if (!jsonMatch) throw new Error('No JSON array found in AI response')
-
-  const parsed: unknown = JSON.parse(jsonMatch[0])
+  // tex: schema output arrives as {"results": [...]}; CLI/legacy output as a bare array.
+  let parsed: unknown
+  try {
+    const obj = JSON.parse(text.trim()) as unknown
+    parsed = obj && typeof obj === 'object' && !Array.isArray(obj) ? (obj as { results?: unknown }).results : obj
+  } catch {
+    const jsonMatch = text.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) throw new Error('No JSON array found in AI response')
+    parsed = JSON.parse(jsonMatch[0])
+  }
   if (!Array.isArray(parsed)) throw new Error('Claude response is not an array')
 
   return (parsed as Record<string, unknown>[]).map((item): CategorizationResult => {
@@ -279,15 +285,56 @@ export async function categorizeBatch(
   }
 
   const model = await getActiveModel()
-  const response = await client.createMessage({
-    model,
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-  })
+  const validSlugs = new Set(allSlugs)
+  // tex: reasoning models spend hidden tokens before the answer, so 2048 truncated the JSON
+  // mid-array. Ask for schema-constrained output with a larger budget, and retry once.
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const response = await client.createMessage({
+      model,
+      max_tokens: 8192,
+      messages: [{ role: 'user', content: prompt }],
+      jsonSchema: { name: 'bookmark_categories', schema: categorizationJsonSchema(allSlugs) },
+    })
+    if (!response.text) { lastErr = new Error('No text content in AI response'); continue }
+    try {
+      return parseCategorizationResponse(response.text, validSlugs)
+    } catch (err) {
+      lastErr = err
+      console.warn(`[categorize] invalid JSON from model (attempt ${attempt}, ${response.text.length} chars)`)
+    }
+  }
+  throw lastErr
+}
 
-  if (!response.text) throw new Error('No text content in AI response')
-
-  return parseCategorizationResponse(response.text, new Set(allSlugs))
+function categorizationJsonSchema(allSlugs: string[]): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['results'],
+    properties: {
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['tweetId', 'assignments'],
+          properties: {
+            tweetId: { type: 'string' },
+            assignments: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['category', 'confidence'],
+                properties: { category: { type: 'string', enum: allSlugs }, confidence: { type: 'number' } },
+              },
+            },
+          },
+        },
+      },
+    },
+  }
 }
 
 export async function writeCategoryResults(results: CategorizationResult[]): Promise<void> {
